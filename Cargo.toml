@@ -1,0 +1,71 @@
+[package]
+name = "nanoclaw"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight personal AI assistant framework in Rust"
+license = "MIT"
+repository = "https://github.com/dusterbloom/nanobot"
+
+[[bin]]
+name = "nanoclaw"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex
+regex = "1"
+
+# Directories
+dirs = "6"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Cron parsing
+cron = "0.15"
+
+# Base64
+base64 = "0.22"
+
+# HTML processing
+scraper = "0.22"
+html-escape = "0.2"
+
+# Async trait
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# URL parsing
+url = "2"
+
+# Mime type guessing
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"
