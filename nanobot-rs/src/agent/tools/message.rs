@@ -124,3 +124,167 @@ impl Tool for MessageTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_tool_name() {
+        let tool = MessageTool::new(None, "test_channel", "test_chat");
+        assert_eq!(tool.name(), "message");
+    }
+
+    #[test]
+    fn test_message_tool_description() {
+        let tool = MessageTool::new(None, "test_channel", "test_chat");
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_message_tool_parameters() {
+        let tool = MessageTool::new(None, "test_channel", "test_chat");
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["content"].is_object());
+        let required = params["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "content"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_without_callback() {
+        let tool = MessageTool::new(None, "chan", "chat");
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("Message sending not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_content() {
+        let tool = MessageTool::new(None, "chan", "chat");
+        let params = HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.contains("'content' parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_empty_channel_and_chat() {
+        let tool = MessageTool::new(None, "", "");
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("No target channel/chat specified"));
+    }
+
+    #[tokio::test]
+    async fn test_set_context() {
+        let tool = MessageTool::new(None, "old_channel", "old_chat");
+        tool.set_context("new_channel", "new_chat").await;
+
+        // Verify context changed by executing without callback -- channel/chat
+        // should now be "new_channel"/"new_chat" (we cannot directly observe
+        // this, but we can verify it does not error with "No target channel").
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let result = tool.execute(params).await;
+        // Should not complain about missing channel -- it should fail on the
+        // callback not being set instead.
+        assert!(result.contains("Message sending not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_mock_callback() {
+        let callback: SendCallback = Arc::new(|_msg: OutboundMessage| {
+            Box::pin(async { Ok(()) })
+        });
+        let tool = MessageTool::new(Some(callback), "telegram", "12345");
+
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello!".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert_eq!(result, "Message sent to telegram:12345");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_failing_callback() {
+        let callback: SendCallback = Arc::new(|_msg: OutboundMessage| {
+            Box::pin(async { Err(anyhow::anyhow!("network error")) })
+        });
+        let tool = MessageTool::new(Some(callback), "discord", "999");
+
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("Error sending message"));
+        assert!(result.contains("network error"));
+    }
+
+    #[tokio::test]
+    async fn test_set_send_callback() {
+        let tool = MessageTool::new(None, "chan", "chat");
+
+        // Initially no callback.
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("Message sending not configured"));
+
+        // Set callback.
+        let callback: SendCallback = Arc::new(|_msg: OutboundMessage| {
+            Box::pin(async { Ok(()) })
+        });
+        tool.set_send_callback(callback).await;
+
+        // Now it should succeed.
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert_eq!(result, "Message sent to chan:chat");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_channel_override() {
+        let callback: SendCallback = Arc::new(|_msg: OutboundMessage| {
+            Box::pin(async { Ok(()) })
+        });
+        let tool = MessageTool::new(Some(callback), "default_chan", "default_chat");
+
+        let mut params = HashMap::new();
+        params.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+        params.insert(
+            "channel".to_string(),
+            serde_json::Value::String("override_chan".to_string()),
+        );
+        params.insert(
+            "chat_id".to_string(),
+            serde_json::Value::String("override_chat".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert_eq!(result, "Message sent to override_chan:override_chat");
+    }
+}

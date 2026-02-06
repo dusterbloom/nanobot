@@ -92,3 +92,187 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// A simple mock tool for registry tests.
+    struct MockTool {
+        tool_name: String,
+    }
+
+    impl MockTool {
+        fn new(name: &str) -> Self {
+            Self {
+                tool_name: name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for MockTool {
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "A mock tool for testing"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"]
+            })
+        }
+
+        async fn execute(&self, params: HashMap<String, serde_json::Value>) -> String {
+            let value = params
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            format!("{}:{}", self.tool_name, value)
+        }
+    }
+
+    #[test]
+    fn test_new_registry_is_empty() {
+        let registry = ToolRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_default_registry_is_empty() {
+        let registry = ToolRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_register_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("test_tool")));
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn test_has_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("alpha")));
+
+        assert!(registry.has("alpha"));
+        assert!(!registry.has("beta"));
+    }
+
+    #[test]
+    fn test_contains_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("alpha")));
+
+        assert!(registry.contains("alpha"));
+        assert!(!registry.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_get_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("fetch")));
+
+        let tool = registry.get("fetch");
+        assert!(tool.is_some());
+        assert_eq!(tool.unwrap().name(), "fetch");
+
+        assert!(registry.get("missing").is_none());
+    }
+
+    #[test]
+    fn test_unregister_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("to_remove")));
+        assert!(registry.has("to_remove"));
+
+        registry.unregister("to_remove");
+        assert!(!registry.has("to_remove"));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn test_unregister_nonexistent_does_nothing() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("keeper")));
+        registry.unregister("nonexistent");
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_register_replaces_existing() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("dup")));
+        registry.register(Box::new(MockTool::new("dup")));
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("alpha")));
+        registry.register(Box::new(MockTool::new("beta")));
+
+        let mut names = registry.tool_names();
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn test_get_definitions() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("def_test")));
+
+        let definitions = registry.get_definitions();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["type"], "function");
+        assert_eq!(definitions[0]["function"]["name"], "def_test");
+    }
+
+    #[test]
+    fn test_len_multiple_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("a")));
+        registry.register(Box::new(MockTool::new("b")));
+        registry.register(Box::new(MockTool::new("c")));
+        assert_eq!(registry.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::new("echo")));
+
+        let mut params = HashMap::new();
+        params.insert(
+            "value".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+
+        let result = registry.execute("echo", params).await;
+        assert_eq!(result, "echo:hello");
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_tool() {
+        let registry = ToolRegistry::new();
+        let params = HashMap::new();
+
+        let result = registry.execute("nonexistent", params).await;
+        assert!(result.contains("Error"));
+        assert!(result.contains("nonexistent"));
+        assert!(result.contains("not found"));
+    }
+}

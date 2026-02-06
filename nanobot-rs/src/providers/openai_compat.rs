@@ -260,3 +260,252 @@ fn parse_response(data: &serde_json::Value) -> Result<LLMResponse> {
         usage,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::base::LLMProvider;
+
+    // ── parse_response tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_response_with_content_and_tool_calls() {
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Sure, let me look that up.",
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\": \"London\", \"units\": \"celsius\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 30,
+                "total_tokens": 80
+            }
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        assert_eq!(resp.content.as_deref(), Some("Sure, let me look that up."));
+        assert_eq!(resp.finish_reason, "tool_calls");
+        assert_eq!(resp.tool_calls.len(), 1);
+
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.id, "call_abc123");
+        assert_eq!(tc.name, "get_weather");
+        assert_eq!(
+            tc.arguments.get("location").and_then(|v| v.as_str()),
+            Some("London")
+        );
+        assert_eq!(
+            tc.arguments.get("units").and_then(|v| v.as_str()),
+            Some("celsius")
+        );
+
+        // Verify usage was extracted.
+        assert_eq!(resp.usage.get("prompt_tokens"), Some(&50));
+        assert_eq!(resp.usage.get("completion_tokens"), Some(&30));
+        assert_eq!(resp.usage.get("total_tokens"), Some(&80));
+    }
+
+    #[test]
+    fn test_parse_response_content_only_no_tool_calls() {
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Hello! How can I help you today?"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 8,
+                "total_tokens": 18
+            }
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        assert_eq!(
+            resp.content.as_deref(),
+            Some("Hello! How can I help you today?")
+        );
+        assert_eq!(resp.finish_reason, "stop");
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(resp.usage.get("total_tokens"), Some(&18));
+    }
+
+    #[test]
+    fn test_parse_response_tool_calls_without_content() {
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": "{\"query\": \"rust async\"}"
+                            }
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\": \"/tmp/test.txt\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        // Content should be None when the message has no "content" field.
+        assert!(resp.content.is_none());
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].name, "search");
+        assert_eq!(resp.tool_calls[1].name, "read_file");
+        assert_eq!(resp.tool_calls[1].id, "call_2");
+        assert_eq!(resp.finish_reason, "tool_calls");
+        // No usage block -> empty map.
+        assert!(resp.usage.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_empty_choices() {
+        let data = serde_json::json!({
+            "choices": []
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        assert_eq!(
+            resp.content.as_deref(),
+            Some("Error: No choices in LLM response")
+        );
+        assert_eq!(resp.finish_reason, "error");
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_missing_choices_key() {
+        // Completely missing "choices" key (e.g. malformed JSON from the API).
+        let data = serde_json::json!({
+            "error": "something went wrong"
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        assert_eq!(
+            resp.content.as_deref(),
+            Some("Error: No choices in LLM response")
+        );
+        assert_eq!(resp.finish_reason, "error");
+    }
+
+    #[test]
+    fn test_parse_response_tool_call_with_unparseable_arguments() {
+        // Arguments that are a string but not valid JSON should be stored under "raw".
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {
+                            "name": "broken_tool",
+                            "arguments": "this is not json"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let resp = parse_response(&data).expect("parse should succeed");
+        assert_eq!(resp.tool_calls.len(), 1);
+        let tc = &resp.tool_calls[0];
+        assert_eq!(tc.name, "broken_tool");
+        // Unparseable JSON string should be stored under the "raw" key.
+        assert_eq!(
+            tc.arguments.get("raw").and_then(|v| v.as_str()),
+            Some("this is not json")
+        );
+    }
+
+    // ── Provider creation / detection tests ───────────────────────
+
+    #[test]
+    fn test_new_openrouter_by_key_prefix() {
+        let provider = OpenAICompatProvider::new("sk-or-my-key", None, None);
+        assert_eq!(provider.api_base, "https://openrouter.ai/api/v1");
+        assert_eq!(provider.default_model, "anthropic/claude-opus-4-5");
+    }
+
+    #[test]
+    fn test_new_openrouter_by_api_base() {
+        let provider = OpenAICompatProvider::new(
+            "some-key",
+            Some("https://openrouter.ai/api/v1"),
+            Some("meta-llama/llama-3-70b"),
+        );
+        assert_eq!(provider.api_base, "https://openrouter.ai/api/v1");
+        assert_eq!(provider.default_model, "meta-llama/llama-3-70b");
+    }
+
+    #[test]
+    fn test_new_deepseek_detection() {
+        let provider =
+            OpenAICompatProvider::new("sk-something", None, Some("deepseek-chat"));
+        assert_eq!(provider.api_base, "https://api.deepseek.com");
+        assert_eq!(provider.default_model, "deepseek-chat");
+    }
+
+    #[test]
+    fn test_new_groq_detection() {
+        let provider =
+            OpenAICompatProvider::new("gsk_something", None, Some("groq/llama3"));
+        assert_eq!(provider.api_base, "https://api.groq.com/openai/v1");
+        assert_eq!(provider.default_model, "groq/llama3");
+    }
+
+    #[test]
+    fn test_new_explicit_api_base_takes_precedence() {
+        let provider = OpenAICompatProvider::new(
+            "sk-or-key",
+            Some("http://localhost:8000/v1/"),
+            Some("my-local-model"),
+        );
+        // Trailing slash should be trimmed.
+        assert_eq!(provider.api_base, "http://localhost:8000/v1");
+        assert_eq!(provider.default_model, "my-local-model");
+    }
+
+    #[test]
+    fn test_new_default_fallback_is_openrouter() {
+        // Unknown key prefix + no api_base + model doesn't match known patterns.
+        let provider =
+            OpenAICompatProvider::new("random-key", None, Some("some-unknown-model"));
+        assert_eq!(provider.api_base, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn test_get_default_model() {
+        let provider = OpenAICompatProvider::new("sk-key", None, Some("gpt-4o"));
+        assert_eq!(provider.get_default_model(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_get_default_model_uses_fallback() {
+        let provider = OpenAICompatProvider::new("sk-key", None, None);
+        assert_eq!(provider.get_default_model(), "anthropic/claude-opus-4-5");
+    }
+}

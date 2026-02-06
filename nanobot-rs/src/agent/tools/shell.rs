@@ -236,3 +236,240 @@ impl Tool for ExecTool {
         output
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create an ExecTool with default deny patterns, no allow patterns,
+    /// and workspace restriction enabled.
+    fn make_exec_tool(restrict: bool) -> ExecTool {
+        ExecTool::new(10, None, None, None, restrict)
+    }
+
+    /// Helper: call guard_command with the given command on a restricted tool.
+    fn guard(command: &str) -> Option<String> {
+        let tool = make_exec_tool(true);
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        tool.guard_command(command, &cwd)
+    }
+
+    /// Helper: call guard_command with workspace restriction disabled.
+    fn guard_unrestricted(command: &str) -> Option<String> {
+        let tool = make_exec_tool(false);
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        tool.guard_command(command, &cwd)
+    }
+
+    // -----------------------------------------------------------------------
+    // Safe commands should be allowed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_guard_allows_ls() {
+        assert!(guard("ls").is_none());
+    }
+
+    #[test]
+    fn test_guard_allows_echo() {
+        assert!(guard("echo hello world").is_none());
+    }
+
+    #[test]
+    fn test_guard_allows_cat() {
+        assert!(guard("cat README.md").is_none());
+    }
+
+    #[test]
+    fn test_guard_allows_pwd() {
+        assert!(guard("pwd").is_none());
+    }
+
+    #[test]
+    fn test_guard_allows_grep() {
+        assert!(guard("grep -r 'pattern' src/").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Dangerous commands should be blocked
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_guard_blocks_rm_rf() {
+        let result = guard("rm -rf /");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("blocked"));
+    }
+
+    #[test]
+    fn test_guard_blocks_rm_fr() {
+        let result = guard("rm -fr /tmp/important");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_mkfs() {
+        let result = guard("mkfs.ext4 /dev/sda1");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("dangerous pattern"));
+    }
+
+    #[test]
+    fn test_guard_blocks_dd() {
+        let result = guard("dd if=/dev/zero of=/dev/sda");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_shutdown() {
+        let result = guard("shutdown -h now");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_reboot() {
+        let result = guard("reboot");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_fork_bomb() {
+        let result = guard(":(){ :|:& };:");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_format() {
+        let result = guard("format C:");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_guard_blocks_diskpart() {
+        let result = guard("diskpart");
+        assert!(result.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Path traversal should be blocked when restrict_to_workspace is true
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_guard_blocks_path_traversal() {
+        let result = guard("cat ../../../etc/passwd");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_guard_allows_path_traversal_when_unrestricted() {
+        // Without workspace restriction, traversal is allowed (though other
+        // deny patterns still apply).
+        let result = guard_unrestricted("cat ../../../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Allow patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_allow_patterns_block_unmatched() {
+        let tool = ExecTool::new(
+            10,
+            None,
+            None,
+            Some(vec![r"^echo\b".to_string()]),
+            false,
+        );
+        let cwd = ".".to_string();
+
+        // "echo" matches, so it should be allowed.
+        assert!(tool.guard_command("echo hi", &cwd).is_none());
+        // "ls" does not match the allowlist.
+        let result = tool.guard_command("ls", &cwd);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("not in allowlist"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool trait basics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exec_tool_name() {
+        let tool = make_exec_tool(false);
+        assert_eq!(tool.name(), "exec");
+    }
+
+    #[test]
+    fn test_exec_tool_description() {
+        let tool = make_exec_tool(false);
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_exec_tool_parameters() {
+        let tool = make_exec_tool(false);
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["command"].is_object());
+    }
+
+    // -----------------------------------------------------------------------
+    // Execute with real commands
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_execute_echo() {
+        let tool = make_exec_tool(false);
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::Value::String("echo test_output".to_string()),
+        );
+
+        let result = tool.execute(params).await;
+        assert!(result.contains("test_output"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_command_param() {
+        let tool = make_exec_tool(false);
+        let params = HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.contains("'command' parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_blocked_command() {
+        let tool = make_exec_tool(true);
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::Value::String("rm -rf /".to_string()),
+        );
+
+        let result = tool.execute(params).await;
+        assert!(result.contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_nonzero_exit() {
+        let tool = make_exec_tool(false);
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::Value::String("false".to_string()),
+        );
+
+        let result = tool.execute(params).await;
+        assert!(result.contains("Exit code:"));
+    }
+}

@@ -281,3 +281,226 @@ fn _guess_mime(path: &str) -> String {
         "application/octet-stream".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: create a ContextBuilder backed by a temporary workspace.
+    fn make_context() -> (TempDir, ContextBuilder) {
+        let tmp = TempDir::new().unwrap();
+        let cb = ContextBuilder::new(tmp.path());
+        (tmp, cb)
+    }
+
+    // ----- _guess_mime -----
+
+    #[test]
+    fn test_guess_mime_jpg() {
+        assert_eq!(_guess_mime("photo.jpg"), "image/jpeg");
+    }
+
+    #[test]
+    fn test_guess_mime_jpeg() {
+        assert_eq!(_guess_mime("photo.jpeg"), "image/jpeg");
+    }
+
+    #[test]
+    fn test_guess_mime_png() {
+        assert_eq!(_guess_mime("image.png"), "image/png");
+    }
+
+    #[test]
+    fn test_guess_mime_gif() {
+        assert_eq!(_guess_mime("anim.gif"), "image/gif");
+    }
+
+    #[test]
+    fn test_guess_mime_webp() {
+        assert_eq!(_guess_mime("pic.webp"), "image/webp");
+    }
+
+    #[test]
+    fn test_guess_mime_svg() {
+        assert_eq!(_guess_mime("icon.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn test_guess_mime_unknown() {
+        assert_eq!(_guess_mime("archive.tar.gz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_guess_mime_case_insensitive() {
+        assert_eq!(_guess_mime("PHOTO.JPG"), "image/jpeg");
+        assert_eq!(_guess_mime("image.PNG"), "image/png");
+    }
+
+    // ----- build_system_prompt -----
+
+    #[test]
+    fn test_build_system_prompt_contains_nanobot_identity() {
+        let (_tmp, cb) = make_context();
+        let prompt = cb.build_system_prompt(None);
+        assert!(
+            prompt.contains("nanobot"),
+            "system prompt should contain 'nanobot' identity"
+        );
+        assert!(
+            prompt.contains("You are nanobot"),
+            "system prompt should contain identity introduction"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_contains_workspace_path() {
+        let (_tmp, cb) = make_context();
+        let prompt = cb.build_system_prompt(None);
+        let workspace_str = cb
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| cb.workspace.clone())
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            prompt.contains(&workspace_str),
+            "system prompt should contain workspace path"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_bootstrap_file() {
+        let tmp = TempDir::new().unwrap();
+        // Write a bootstrap file that ContextBuilder looks for.
+        fs::write(tmp.path().join("SOUL.md"), "I am a helpful bot").unwrap();
+        let cb = ContextBuilder::new(tmp.path());
+        let prompt = cb.build_system_prompt(None);
+        assert!(
+            prompt.contains("I am a helpful bot"),
+            "system prompt should include content from SOUL.md"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_memory() {
+        let tmp = TempDir::new().unwrap();
+        let memory_dir = tmp.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("MEMORY.md"), "User prefers dark mode").unwrap();
+        let cb = ContextBuilder::new(tmp.path());
+        let prompt = cb.build_system_prompt(None);
+        assert!(
+            prompt.contains("User prefers dark mode"),
+            "system prompt should include long-term memory"
+        );
+    }
+
+    // ----- build_messages -----
+
+    #[test]
+    fn test_build_messages_structure() {
+        let (_tmp, cb) = make_context();
+        let history: Vec<Value> = vec![json!({"role": "user", "content": "hello"})];
+        let messages = cb.build_messages(&history, "what's up?", None, None, None, None);
+
+        // Should have: system, history entry, current user message.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "hello");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "what's up?");
+    }
+
+    #[test]
+    fn test_build_messages_includes_channel_and_chat_id() {
+        let (_tmp, cb) = make_context();
+        let messages =
+            cb.build_messages(&[], "hi", None, None, Some("telegram"), Some("12345"));
+        let system_content = messages[0]["content"].as_str().unwrap();
+        assert!(system_content.contains("Channel: telegram"));
+        assert!(system_content.contains("Chat ID: 12345"));
+    }
+
+    #[test]
+    fn test_build_messages_without_history() {
+        let (_tmp, cb) = make_context();
+        let messages = cb.build_messages(&[], "test", None, None, None, None);
+        // system + current user message
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    // ----- add_tool_result -----
+
+    #[test]
+    fn test_add_tool_result() {
+        let mut messages: Vec<Value> = Vec::new();
+        ContextBuilder::add_tool_result(&mut messages, "call_123", "read_file", "file content");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_123");
+        assert_eq!(messages[0]["name"], "read_file");
+        assert_eq!(messages[0]["content"], "file content");
+    }
+
+    #[test]
+    fn test_add_tool_result_multiple() {
+        let mut messages: Vec<Value> = Vec::new();
+        ContextBuilder::add_tool_result(&mut messages, "c1", "tool_a", "result_a");
+        ContextBuilder::add_tool_result(&mut messages, "c2", "tool_b", "result_b");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["name"], "tool_a");
+        assert_eq!(messages[1]["name"], "tool_b");
+    }
+
+    // ----- add_assistant_message -----
+
+    #[test]
+    fn test_add_assistant_message_content_only() {
+        let mut messages: Vec<Value> = Vec::new();
+        ContextBuilder::add_assistant_message(&mut messages, Some("Hello!"), None);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Hello!");
+        assert!(messages[0].get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn test_add_assistant_message_with_tool_calls() {
+        let mut messages: Vec<Value> = Vec::new();
+        let tool_calls = vec![json!({
+            "id": "tc_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"}
+        })];
+        ContextBuilder::add_assistant_message(&mut messages, Some("Let me check."), Some(&tool_calls));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Let me check.");
+        let tc = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], "tc_1");
+    }
+
+    #[test]
+    fn test_add_assistant_message_no_content() {
+        let mut messages: Vec<Value> = Vec::new();
+        ContextBuilder::add_assistant_message(&mut messages, None, None);
+        assert_eq!(messages[0]["content"], "");
+    }
+
+    #[test]
+    fn test_add_assistant_message_empty_tool_calls() {
+        let mut messages: Vec<Value> = Vec::new();
+        let empty: Vec<Value> = vec![];
+        ContextBuilder::add_assistant_message(&mut messages, Some("ok"), Some(&empty));
+        // Empty tool_calls should not add the key.
+        assert!(messages[0].get("tool_calls").is_none());
+    }
+}

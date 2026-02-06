@@ -333,3 +333,297 @@ fn expand_path(path: &str) -> PathBuf {
         PathBuf::from(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    // -----------------------------------------------------------------------
+    // expand_path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_expand_path_absolute() {
+        let result = expand_path("/tmp/test.txt");
+        assert_eq!(result, PathBuf::from("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn test_expand_path_relative() {
+        let result = expand_path("foo/bar.txt");
+        assert_eq!(result, PathBuf::from("foo/bar.txt"));
+    }
+
+    #[test]
+    fn test_expand_path_tilde() {
+        let result = expand_path("~");
+        // Should be the home directory (or "." if none).
+        assert!(result.is_absolute() || result == PathBuf::from("."));
+    }
+
+    #[test]
+    fn test_expand_path_tilde_subpath() {
+        let result = expand_path("~/Documents/file.txt");
+        // Should end with Documents/file.txt.
+        assert!(result.to_string_lossy().ends_with("Documents/file.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ReadFileTool tests
+    // -----------------------------------------------------------------------
+
+    fn make_params(pairs: &[(&str, &str)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_read_file_existing() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("hello.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let tool = ReadFileTool;
+        let params = make_params(&[("path", file_path.to_str().unwrap())]);
+        let result = tool.execute(params).await;
+        assert_eq!(result, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_missing() {
+        let tool = ReadFileTool;
+        let params = make_params(&[("path", "/tmp/nonexistent_nanobot_test_file_xyz.txt")]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Error: File not found"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_missing_param() {
+        let tool = ReadFileTool;
+        let params = HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.contains("'path' parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_not_a_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = ReadFileTool;
+        let params = make_params(&[("path", dir.path().to_str().unwrap())]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Error: Not a file"));
+    }
+
+    #[test]
+    fn test_read_file_name() {
+        let tool = ReadFileTool;
+        assert_eq!(tool.name(), "read_file");
+    }
+
+    #[test]
+    fn test_read_file_parameters_schema() {
+        let tool = ReadFileTool;
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["path"].is_object());
+    }
+
+    // -----------------------------------------------------------------------
+    // WriteFileTool tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_write_file_creates_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("output.txt");
+
+        let tool = WriteFileTool;
+        let params = make_params(&[
+            ("path", file_path.to_str().unwrap()),
+            ("content", "test content"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Successfully wrote"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "test content");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_creates_parent_dirs() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("subdir").join("nested").join("file.txt");
+
+        let tool = WriteFileTool;
+        let params = make_params(&[
+            ("path", file_path.to_str().unwrap()),
+            ("content", "nested content"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Successfully wrote"));
+        assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_missing_path() {
+        let tool = WriteFileTool;
+        let params = make_params(&[("content", "test")]);
+        let result = tool.execute(params).await;
+        assert!(result.contains("'path' parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_missing_content() {
+        let tool = WriteFileTool;
+        let params = make_params(&[("path", "/tmp/test.txt")]);
+        let result = tool.execute(params).await;
+        assert!(result.contains("'content' parameter is required"));
+    }
+
+    #[test]
+    fn test_write_file_name() {
+        let tool = WriteFileTool;
+        assert_eq!(tool.name(), "write_file");
+    }
+
+    // -----------------------------------------------------------------------
+    // EditFileTool tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_edit_file_replace_string() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("edit_me.txt");
+        std::fs::write(&file_path, "Hello World! This is a test.").unwrap();
+
+        let tool = EditFileTool;
+        let params = make_params(&[
+            ("path", file_path.to_str().unwrap()),
+            ("old_text", "World"),
+            ("new_text", "Rust"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Successfully edited"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Hello Rust! This is a test.");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_old_text_not_found() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("edit_me.txt");
+        std::fs::write(&file_path, "Hello World!").unwrap();
+
+        let tool = EditFileTool;
+        let params = make_params(&[
+            ("path", file_path.to_str().unwrap()),
+            ("old_text", "nonexistent text"),
+            ("new_text", "replacement"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.contains("old_text not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_multiple_occurrences() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("dup.txt");
+        std::fs::write(&file_path, "aaa bbb aaa").unwrap();
+
+        let tool = EditFileTool;
+        let params = make_params(&[
+            ("path", file_path.to_str().unwrap()),
+            ("old_text", "aaa"),
+            ("new_text", "ccc"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.contains("appears 2 times"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_missing_file() {
+        let tool = EditFileTool;
+        let params = make_params(&[
+            ("path", "/tmp/nonexistent_nanobot_edit_test_xyz.txt"),
+            ("old_text", "a"),
+            ("new_text", "b"),
+        ]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Error: File not found"));
+    }
+
+    #[test]
+    fn test_edit_file_name() {
+        let tool = EditFileTool;
+        assert_eq!(tool.name(), "edit_file");
+    }
+
+    // -----------------------------------------------------------------------
+    // ListDirTool tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_dir_basic() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file_a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("file_b.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let tool = ListDirTool;
+        let params = make_params(&[("path", dir.path().to_str().unwrap())]);
+        let result = tool.execute(params).await;
+
+        assert!(result.contains("[file] file_a.txt"));
+        assert!(result.contains("[file] file_b.txt"));
+        assert!(result.contains("[dir]  subdir"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_empty() {
+        let dir = TempDir::new().unwrap();
+
+        let tool = ListDirTool;
+        let params = make_params(&[("path", dir.path().to_str().unwrap())]);
+        let result = tool.execute(params).await;
+        assert!(result.contains("is empty"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_not_found() {
+        let tool = ListDirTool;
+        let params = make_params(&[("path", "/tmp/nonexistent_nanobot_dir_xyz")]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Error: Directory not found"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_not_a_directory() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("file.txt");
+        std::fs::write(&file_path, "content").unwrap();
+
+        let tool = ListDirTool;
+        let params = make_params(&[("path", file_path.to_str().unwrap())]);
+        let result = tool.execute(params).await;
+        assert!(result.starts_with("Error: Not a directory"));
+    }
+
+    #[test]
+    fn test_list_dir_name() {
+        let tool = ListDirTool;
+        assert_eq!(tool.name(), "list_dir");
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_missing_param() {
+        let tool = ListDirTool;
+        let params = HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.contains("'path' parameter is required"));
+    }
+}

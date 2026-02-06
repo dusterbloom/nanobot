@@ -401,8 +401,9 @@ fn html_to_markdown_simple(html: &str) -> String {
         format!("[{}]({})", inner, href)
     });
 
-    // Convert headings.
-    let re_headings = Regex::new(r"(?is)<h([1-6])[^>]*>([\s\S]*?)</h\1>").unwrap();
+    // Convert headings (h1-h6). We can't use backreferences (\1) in the regex
+    // crate, so we match any closing </hN> and extract the level from the opening tag.
+    let re_headings = Regex::new(r"(?is)<h([1-6])[^>]*>([\s\S]*?)</h[1-6]>").unwrap();
     let text = re_headings.replace_all(&text, |caps: &regex::Captures| {
         let level: usize = caps[1].parse().unwrap_or(1);
         let inner = strip_tags(&caps[2]);
@@ -425,4 +426,273 @@ fn html_to_markdown_simple(html: &str) -> String {
     let text = re_br.replace_all(&text, "\n");
 
     normalize_whitespace(&strip_tags(&text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // validate_url tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_url_http() {
+        assert!(validate_url("http://example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_https() {
+        assert!(validate_url("https://example.com/path?q=1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_ftp_rejected() {
+        let result = validate_url("ftp://example.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("http/https"));
+    }
+
+    #[test]
+    fn test_validate_url_empty() {
+        let result = validate_url("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_url_no_scheme() {
+        let result = validate_url("example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_url_file_scheme_rejected() {
+        let result = validate_url("file:///etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_url_missing_domain() {
+        let result = validate_url("http://");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_tags tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_tags_basic() {
+        let result = strip_tags("<p>Hello <b>World</b></p>");
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_strip_tags_removes_script() {
+        let html = "Before<script>alert('xss')</script>After";
+        let result = strip_tags(html);
+        assert_eq!(result, "BeforeAfter");
+    }
+
+    #[test]
+    fn test_strip_tags_removes_style() {
+        let html = "Before<style>body { color: red; }</style>After";
+        let result = strip_tags(html);
+        assert_eq!(result, "BeforeAfter");
+    }
+
+    #[test]
+    fn test_strip_tags_plain_text() {
+        let result = strip_tags("no tags here");
+        assert_eq!(result, "no tags here");
+    }
+
+    #[test]
+    fn test_strip_tags_html_entities() {
+        let result = strip_tags("&amp; &lt; &gt;");
+        assert_eq!(result, "& < >");
+    }
+
+    #[test]
+    fn test_strip_tags_empty() {
+        let result = strip_tags("");
+        assert_eq!(result, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_whitespace tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_normalize_whitespace_collapses_spaces() {
+        let result = normalize_whitespace("hello    world");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_collapses_tabs() {
+        let result = normalize_whitespace("hello\t\tworld");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_limits_newlines() {
+        let result = normalize_whitespace("hello\n\n\n\n\nworld");
+        assert_eq!(result, "hello\n\nworld");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_trims() {
+        let result = normalize_whitespace("   hello   ");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_double_newline() {
+        let result = normalize_whitespace("hello\n\nworld");
+        assert_eq!(result, "hello\n\nworld");
+    }
+
+    // -----------------------------------------------------------------------
+    // html_to_markdown_simple tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_html_to_markdown_headings() {
+        let html = "<h1>Title</h1><h2>Subtitle</h2>";
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("# Title"), "result: {}", result);
+        assert!(result.contains("## Subtitle"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_html_to_markdown_links() {
+        let html = r#"<a href="https://example.com">Example</a>"#;
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("[Example](https://example.com)"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_html_to_markdown_list_items() {
+        let html = "<ul><li>First</li><li>Second</li></ul>";
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("- First"), "result: {}", result);
+        assert!(result.contains("- Second"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_html_to_markdown_paragraphs() {
+        let html = "<p>First paragraph</p><p>Second paragraph</p>";
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("First paragraph"), "result: {}", result);
+        assert!(result.contains("Second paragraph"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_html_to_markdown_br() {
+        let html = "line1<br/>line2";
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("line1"), "result: {}", result);
+        assert!(result.contains("line2"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_html_to_markdown_strips_remaining_tags() {
+        let html = "<div><span>text</span></div>";
+        let result = html_to_markdown_simple(html);
+        assert!(result.contains("text"), "result: {}", result);
+        assert!(!result.contains("<span>"), "result: {}", result);
+        assert!(!result.contains("<div>"), "result: {}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_html_content tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_html_content_with_title() {
+        let html = "<html><head><title>Test Page</title></head><body><p>Content here</p></body></html>";
+        let result = extract_html_content(html, "text");
+        assert!(result.contains("# Test Page"), "result: {}", result);
+        assert!(result.contains("Content here"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_extract_html_content_markdown_mode() {
+        let html = "<html><body><h1>Heading</h1><p>Paragraph</p></body></html>";
+        let result = extract_html_content(html, "markdown");
+        assert!(result.contains("# Heading"), "result: {}", result);
+        assert!(result.contains("Paragraph"), "result: {}", result);
+    }
+
+    #[test]
+    fn test_extract_html_content_prefers_article() {
+        let html = "<html><body><div>Noise</div><article><p>Article content</p></article></body></html>";
+        let result = extract_html_content(html, "text");
+        assert!(result.contains("Article content"), "result: {}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool trait basics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_web_search_tool_name() {
+        let tool = WebSearchTool::new(None, 5);
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn test_web_search_tool_parameters() {
+        let tool = WebSearchTool::new(None, 5);
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn test_web_fetch_tool_name() {
+        let tool = WebFetchTool::new(50000);
+        assert_eq!(tool.name(), "web_fetch");
+    }
+
+    #[test]
+    fn test_web_fetch_tool_parameters() {
+        let tool = WebFetchTool::new(50000);
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["url"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_web_search_no_api_key() {
+        let tool = WebSearchTool::new(Some(String::new()), 5);
+        let mut params = HashMap::new();
+        params.insert(
+            "query".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("BRAVE_API_KEY not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_invalid_url() {
+        let tool = WebFetchTool::new(50000);
+        let mut params = HashMap::new();
+        params.insert(
+            "url".to_string(),
+            serde_json::Value::String("ftp://invalid.example".to_string()),
+        );
+        let result = tool.execute(params).await;
+        assert!(result.contains("error") || result.contains("URL validation failed"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_missing_url() {
+        let tool = WebFetchTool::new(50000);
+        let params = HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.contains("url parameter is required"));
+    }
 }

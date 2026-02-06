@@ -326,7 +326,10 @@ fn cmd_gateway(port: u16, verbose: bool) {
         };
 
         let cron_store_path = get_data_dir().join("cron").join("jobs.json");
-        let cron_service = Arc::new(CronService::new(cron_store_path));
+        let mut cron_service = CronService::new(cron_store_path);
+        cron_service.start().await;
+        let cron_status = cron_service.status();
+        let cron_arc = Arc::new(cron_service);
 
         let mut agent_loop = AgentLoop::new(
             inbound_rx,
@@ -339,7 +342,7 @@ fn cmd_gateway(port: u16, verbose: bool) {
             brave_key,
             config.tools.exec_.timeout,
             config.tools.exec_.restrict_to_workspace,
-            Some(cron_service),
+            Some(cron_arc),
         );
 
         let channel_manager = ChannelManager::new(&config, inbound_tx, outbound_rx);
@@ -349,6 +352,13 @@ fn cmd_gateway(port: u16, verbose: bool) {
             println!("  Channels enabled: {}", enabled.join(", "));
         } else {
             println!("  Warning: No channels enabled");
+        }
+
+        {
+            let job_count = cron_status.get("jobs").and_then(|v| v.as_i64()).unwrap_or(0);
+            if job_count > 0 {
+                println!("  Cron: {} scheduled jobs", job_count);
+            }
         }
 
         println!("  Heartbeat: every 30m");
@@ -380,15 +390,35 @@ fn cmd_status() {
     let workspace = config.workspace_path();
 
     println!("{} nanobot Status\n", LOGO);
-    println!("Config: {} [{}]", config_path.display(), if config_path.exists() { "ok" } else { "missing" });
-    println!("Workspace: {} [{}]", workspace.display(), if workspace.exists() { "ok" } else { "missing" });
+    println!(
+        "Config: {} [{}]",
+        config_path.display(),
+        if config_path.exists() { "ok" } else { "missing" }
+    );
+    println!(
+        "Workspace: {} [{}]",
+        workspace.display(),
+        if workspace.exists() { "ok" } else { "missing" }
+    );
 
     if config_path.exists() {
         println!("Model: {}", config.agents.defaults.model);
-        println!("OpenRouter API: {}", if config.providers.openrouter.api_key.is_empty() { "not set" } else { "configured" });
-        println!("Anthropic API: {}", if config.providers.anthropic.api_key.is_empty() { "not set" } else { "configured" });
-        println!("OpenAI API: {}", if config.providers.openai.api_key.is_empty() { "not set" } else { "configured" });
-        println!("Gemini API: {}", if config.providers.gemini.api_key.is_empty() { "not set" } else { "configured" });
+        println!(
+            "OpenRouter API: {}",
+            if config.providers.openrouter.api_key.is_empty() { "not set" } else { "configured" }
+        );
+        println!(
+            "Anthropic API: {}",
+            if config.providers.anthropic.api_key.is_empty() { "not set" } else { "configured" }
+        );
+        println!(
+            "OpenAI API: {}",
+            if config.providers.openai.api_key.is_empty() { "not set" } else { "configured" }
+        );
+        println!(
+            "Gemini API: {}",
+            if config.providers.gemini.api_key.is_empty() { "not set" } else { "configured" }
+        );
         let vllm_status = if let Some(ref base) = config.providers.vllm.api_base {
             format!("configured ({})", base)
         } else {
@@ -405,20 +435,26 @@ fn cmd_status() {
 fn cmd_channels_status() {
     let config = load_config(None);
     println!("Channel Status\n");
-    println!("  WhatsApp: {} ({})",
+    println!(
+        "  WhatsApp: {} ({})",
         if config.channels.whatsapp.enabled { "enabled" } else { "disabled" },
-        config.channels.whatsapp.bridge_url);
+        config.channels.whatsapp.bridge_url
+    );
     let tg_info = if config.channels.telegram.token.is_empty() {
         "not configured".to_string()
     } else {
         let t = &config.channels.telegram.token;
         format!("token: {}...", &t[..t.len().min(10)])
     };
-    println!("  Telegram: {} ({})",
+    println!(
+        "  Telegram: {} ({})",
         if config.channels.telegram.enabled { "enabled" } else { "disabled" },
-        tg_info);
-    println!("  Feishu: {}",
-        if config.channels.feishu.enabled { "enabled" } else { "disabled" });
+        tg_info
+    );
+    println!(
+        "  Feishu: {}",
+        if config.channels.feishu.enabled { "enabled" } else { "disabled" }
+    );
 }
 
 // ============================================================================
@@ -436,7 +472,10 @@ fn cmd_cron_list(include_all: bool) {
     }
 
     println!("Scheduled Jobs\n");
-    println!("{:<10} {:<20} {:<15} {:<10} {}", "ID", "Name", "Schedule", "Status", "Next Run");
+    println!(
+        "{:<10} {:<20} {:<15} {:<10} {}",
+        "ID", "Name", "Schedule", "Status", "Next Run"
+    );
     println!("{}", "-".repeat(70));
 
     for job in &jobs {
@@ -446,23 +485,43 @@ fn cmd_cron_list(include_all: bool) {
             _ => "one-time".to_string(),
         };
         let status = if job.enabled { "enabled" } else { "disabled" };
-        let next_run = job.state.next_run_at_ms
-            .map(|ms| chrono::DateTime::from_timestamp(ms / 1000, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default())
+        let next_run = job
+            .state
+            .next_run_at_ms
+            .map(|ms| {
+                chrono::DateTime::from_timestamp(ms / 1000, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            })
             .unwrap_or_default();
-        println!("{:<10} {:<20} {:<15} {:<10} {}", job.id, job.name, sched, status, next_run);
+        println!(
+            "{:<10} {:<20} {:<15} {:<10} {}",
+            job.id, job.name, sched, status, next_run
+        );
     }
 }
 
 fn cmd_cron_add(
-    name: String, message: String, every: Option<u64>, cron_expr: Option<String>,
-    deliver: bool, to: Option<String>, channel: Option<String>,
+    name: String,
+    message: String,
+    every: Option<u64>,
+    cron_expr: Option<String>,
+    deliver: bool,
+    to: Option<String>,
+    channel: Option<String>,
 ) {
     let schedule = if let Some(secs) = every {
-        CronSchedule { kind: "every".to_string(), every_ms: Some((secs * 1000) as i64), ..Default::default() }
+        CronSchedule {
+            kind: "every".to_string(),
+            every_ms: Some((secs * 1000) as i64),
+            ..Default::default()
+        }
     } else if let Some(expr) = cron_expr {
-        CronSchedule { kind: "cron".to_string(), expr: Some(expr), ..Default::default() }
+        CronSchedule {
+            kind: "cron".to_string(),
+            expr: Some(expr),
+            ..Default::default()
+        }
     } else {
         eprintln!("Error: Must specify --every or --cron");
         std::process::exit(1);
@@ -470,7 +529,15 @@ fn cmd_cron_add(
 
     let store_path = get_data_dir().join("cron").join("jobs.json");
     let mut service = CronService::new(store_path);
-    let job = service.add_job(&name, schedule, &message, deliver, channel.as_deref(), to.as_deref(), false);
+    let job = service.add_job(
+        &name,
+        schedule,
+        &message,
+        deliver,
+        channel.as_deref(),
+        to.as_deref(),
+        false,
+    );
     println!("  Added job '{}' ({})", job.name, job.id);
 }
 
@@ -488,7 +555,8 @@ fn cmd_cron_enable(job_id: String, disable: bool) {
     let store_path = get_data_dir().join("cron").join("jobs.json");
     let mut service = CronService::new(store_path);
     if let Some(job) = service.enable_job(&job_id, !disable) {
-        println!("  Job '{}' {}", job.name, if disable { "disabled" } else { "enabled" });
+        let status = if disable { "disabled" } else { "enabled" };
+        println!("  Job '{}' {}", job.name, status);
     } else {
         eprintln!("Job {} not found", job_id);
     }
@@ -502,5 +570,9 @@ fn create_provider(config: &Config) -> Arc<dyn LLMProvider> {
     let api_key = config.get_api_key().unwrap_or_default();
     let api_base = config.get_api_base();
     let model = &config.agents.defaults.model;
-    Arc::new(OpenAICompatProvider::new(&api_key, api_base.as_deref(), Some(model)))
+    Arc::new(OpenAICompatProvider::new(
+        &api_key,
+        api_base.as_deref(),
+        Some(model.as_str()),
+    ))
 }

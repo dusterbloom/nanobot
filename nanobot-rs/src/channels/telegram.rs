@@ -432,8 +432,10 @@ pub fn markdown_to_telegram_html(text: &str) -> String {
     let text = re_bold_under.replace_all(&text, "<b>$1</b>").to_string();
 
     // 8. Italic _text_ (avoid matching inside words).
-    let re_italic = Regex::new(r"(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])").unwrap();
-    let text = re_italic.replace_all(&text, "<i>$1</i>").to_string();
+    // The regex crate does not support look-around, so we capture the
+    // preceding and following non-alphanumeric characters and restore them.
+    let re_italic = Regex::new(r"(^|[^a-zA-Z0-9])_([^_]+)_($|[^a-zA-Z0-9])").unwrap();
+    let text = re_italic.replace_all(&text, "$1<i>$2</i>$3").to_string();
 
     // 9. Strikethrough ~~text~~.
     let re_strike = Regex::new(r"~~(.+?)~~").unwrap();
@@ -468,4 +470,225 @@ pub fn markdown_to_telegram_html(text: &str) -> String {
     }
 
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- empty / plain text -----
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(markdown_to_telegram_html(""), "");
+    }
+
+    #[test]
+    fn test_plain_text_passthrough() {
+        assert_eq!(markdown_to_telegram_html("hello world"), "hello world");
+    }
+
+    // ----- HTML escaping -----
+
+    #[test]
+    fn test_html_escaping_angle_brackets() {
+        let result = markdown_to_telegram_html("<script>alert('xss')</script>");
+        assert!(result.contains("&lt;script&gt;"));
+        assert!(result.contains("&lt;/script&gt;"));
+        assert!(!result.contains("<script>"));
+    }
+
+    #[test]
+    fn test_html_escaping_ampersand() {
+        let result = markdown_to_telegram_html("A & B");
+        assert_eq!(result, "A &amp; B");
+    }
+
+    // ----- bold -----
+
+    #[test]
+    fn test_bold_double_asterisk() {
+        let result = markdown_to_telegram_html("this is **bold** text");
+        assert_eq!(result, "this is <b>bold</b> text");
+    }
+
+    #[test]
+    fn test_bold_double_underscore() {
+        let result = markdown_to_telegram_html("this is __bold__ text");
+        assert_eq!(result, "this is <b>bold</b> text");
+    }
+
+    // ----- italic -----
+
+    #[test]
+    fn test_italic_underscore() {
+        let result = markdown_to_telegram_html("this is _italic_ text");
+        assert_eq!(result, "this is <i>italic</i> text");
+    }
+
+    // ----- strikethrough -----
+
+    #[test]
+    fn test_strikethrough() {
+        let result = markdown_to_telegram_html("this is ~~deleted~~ text");
+        assert_eq!(result, "this is <s>deleted</s> text");
+    }
+
+    // ----- inline code -----
+
+    #[test]
+    fn test_inline_code() {
+        let result = markdown_to_telegram_html("use `println!` macro");
+        assert_eq!(result, "use <code>println!</code> macro");
+    }
+
+    #[test]
+    fn test_inline_code_escapes_html_inside() {
+        let result = markdown_to_telegram_html("try `<div>`");
+        assert!(result.contains("<code>&lt;div&gt;</code>"));
+    }
+
+    // ----- code blocks -----
+
+    #[test]
+    fn test_code_block() {
+        let input = "```\nlet x = 1;\n```";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("<pre><code>"));
+        assert!(result.contains("let x = 1;"));
+        assert!(result.contains("</code></pre>"));
+    }
+
+    #[test]
+    fn test_code_block_with_language() {
+        let input = "```rust\nfn main() {}\n```";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("<pre><code>"));
+        assert!(result.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn test_code_block_escapes_html_inside() {
+        let input = "```\n<b>not bold</b>\n```";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("&lt;b&gt;not bold&lt;/b&gt;"));
+    }
+
+    // ----- links -----
+
+    #[test]
+    fn test_link() {
+        let result = markdown_to_telegram_html("[click here](https://example.com)");
+        assert_eq!(result, r#"<a href="https://example.com">click here</a>"#);
+    }
+
+    // ----- headers -----
+
+    #[test]
+    fn test_header_stripped_to_plain_text() {
+        let result = markdown_to_telegram_html("# Header");
+        assert_eq!(result, "Header");
+    }
+
+    #[test]
+    fn test_header_h2() {
+        let result = markdown_to_telegram_html("## Sub Header");
+        assert_eq!(result, "Sub Header");
+    }
+
+    #[test]
+    fn test_header_h3() {
+        let result = markdown_to_telegram_html("### Deep Header");
+        assert_eq!(result, "Deep Header");
+    }
+
+    // ----- bullet lists -----
+
+    #[test]
+    fn test_bullet_list_dash() {
+        let result = markdown_to_telegram_html("- item one\n- item two");
+        assert!(result.contains("\u{2022} item one"));
+        assert!(result.contains("\u{2022} item two"));
+    }
+
+    #[test]
+    fn test_bullet_list_asterisk() {
+        let result = markdown_to_telegram_html("* first\n* second");
+        assert!(result.contains("\u{2022} first"));
+        assert!(result.contains("\u{2022} second"));
+    }
+
+    // ----- blockquotes -----
+
+    #[test]
+    fn test_blockquote_stripped() {
+        let result = markdown_to_telegram_html("> quoted text");
+        assert_eq!(result, "quoted text");
+    }
+
+    // ----- combined formatting -----
+
+    #[test]
+    fn test_combined_formatting() {
+        let input = "# Title\n\nSome **bold** and _italic_ text.\n\n- item 1\n- item 2\n\n`code`";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("Title"));
+        assert!(result.contains("<b>bold</b>"));
+        assert!(result.contains("<i>italic</i>"));
+        assert!(result.contains("\u{2022} item 1"));
+        assert!(result.contains("<code>code</code>"));
+    }
+
+    #[test]
+    fn test_bold_and_link_together() {
+        let input = "Check **this** [link](https://example.com)";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("<b>this</b>"));
+        assert!(result.contains(r#"<a href="https://example.com">link</a>"#));
+    }
+
+    #[test]
+    fn test_code_block_not_affected_by_formatting() {
+        // Bold markers inside code blocks should not be converted.
+        let input = "```\n**not bold**\n```";
+        let result = markdown_to_telegram_html(input);
+        // The ** should pass through unmodified inside the code block.
+        assert!(!result.contains("<b>"));
+    }
+
+    #[test]
+    fn test_inline_code_not_affected_by_formatting() {
+        // Bold markers inside inline code should not be converted.
+        let input = "see `**raw**` here";
+        let result = markdown_to_telegram_html(input);
+        assert!(!result.contains("<b>"));
+        assert!(result.contains("<code>"));
+    }
+
+    #[test]
+    fn test_multiline_message() {
+        let input = "\
+# Status Report
+
+Deployment was **successful**.
+
+## Details
+
+- Service A: _running_
+- Service B: ~~stopped~~ _restarted_
+
+See [docs](https://docs.example.com) for more info.
+
+```bash
+systemctl restart service-b
+```";
+        let result = markdown_to_telegram_html(input);
+        assert!(result.contains("Status Report"));
+        assert!(result.contains("<b>successful</b>"));
+        assert!(result.contains("<i>running</i>"));
+        assert!(result.contains("<s>stopped</s>"));
+        assert!(result.contains(r#"<a href="https://docs.example.com">docs</a>"#));
+        assert!(result.contains("<pre><code>"));
+        assert!(result.contains("systemctl restart service-b"));
+    }
 }

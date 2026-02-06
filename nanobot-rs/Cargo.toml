@@ -65,3 +65,6 @@ url = "2"
 
 # Mime type guessing
 mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"

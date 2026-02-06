@@ -378,3 +378,323 @@ fn _escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Helper: create a workspace temp dir with a skills/ subdirectory
+    /// containing one skill named `test-skill` with a SKILL.md file.
+    fn make_workspace_with_skill(
+        frontmatter: Option<&str>,
+        body: &str,
+    ) -> (TempDir, SkillsLoader) {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("skills").join("test-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = match frontmatter {
+            Some(fm) => format!("---\n{}\n---\n{}", fm, body),
+            None => body.to_string(),
+        };
+        fs::write(skill_dir.join("SKILL.md"), &content).unwrap();
+
+        // Point builtin_skills to a non-existent dir so it is ignored.
+        let loader = SkillsLoader::new(tmp.path(), Some(&tmp.path().join("no_builtin")));
+        (tmp, loader)
+    }
+
+    // ----- _strip_frontmatter -----
+
+    #[test]
+    fn test_strip_frontmatter_with_frontmatter() {
+        let content = "---\ntitle: Test\n---\nBody content";
+        let result = _strip_frontmatter(content);
+        assert_eq!(result, "Body content");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_without_frontmatter() {
+        let content = "Just plain markdown content";
+        let result = _strip_frontmatter(content);
+        assert_eq!(result, "Just plain markdown content");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_multiline_body() {
+        let content = "---\nkey: val\n---\nLine 1\nLine 2\nLine 3";
+        let result = _strip_frontmatter(content);
+        assert_eq!(result, "Line 1\nLine 2\nLine 3");
+    }
+
+    // ----- _escape_xml -----
+
+    #[test]
+    fn test_escape_xml_ampersand() {
+        assert_eq!(_escape_xml("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn test_escape_xml_angle_brackets() {
+        assert_eq!(_escape_xml("<tag>"), "&lt;tag&gt;");
+    }
+
+    #[test]
+    fn test_escape_xml_combined() {
+        assert_eq!(
+            _escape_xml("x < y & y > z"),
+            "x &lt; y &amp; y &gt; z"
+        );
+    }
+
+    #[test]
+    fn test_escape_xml_no_special_chars() {
+        assert_eq!(_escape_xml("hello world"), "hello world");
+    }
+
+    // ----- _parse_nanobot_metadata -----
+
+    #[test]
+    fn test_parse_nanobot_metadata_empty_string() {
+        let result = _parse_nanobot_metadata("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_nanobot_metadata_valid_json() {
+        let raw = r#"{"nanobot": {"always": true, "priority": 1}}"#;
+        let result = _parse_nanobot_metadata(raw);
+        assert_eq!(
+            result.get("always").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            result.get("priority").and_then(|v| v.as_i64()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_parse_nanobot_metadata_no_nanobot_key() {
+        let raw = r#"{"other": {"key": "val"}}"#;
+        let result = _parse_nanobot_metadata(raw);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_nanobot_metadata_invalid_json() {
+        let raw = "not json at all";
+        let result = _parse_nanobot_metadata(raw);
+        assert!(result.is_empty());
+    }
+
+    // ----- _check_requirements -----
+
+    #[test]
+    fn test_check_requirements_no_requires_key() {
+        let meta: HashMap<String, serde_json::Value> = HashMap::new();
+        assert!(_check_requirements(&meta));
+    }
+
+    #[test]
+    fn test_check_requirements_with_existing_bin() {
+        // "ls" should always exist on Linux/macOS.
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        meta.insert(
+            "requires".to_string(),
+            serde_json::json!({"bins": ["ls"]}),
+        );
+        assert!(_check_requirements(&meta));
+    }
+
+    #[test]
+    fn test_check_requirements_with_missing_bin() {
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        meta.insert(
+            "requires".to_string(),
+            serde_json::json!({"bins": ["this_binary_does_not_exist_xyz_123"]}),
+        );
+        assert!(!_check_requirements(&meta));
+    }
+
+    #[test]
+    fn test_check_requirements_with_missing_env() {
+        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
+        meta.insert(
+            "requires".to_string(),
+            serde_json::json!({"env": ["NANOBOT_TEST_NONEXISTENT_VAR_XYZ"]}),
+        );
+        assert!(!_check_requirements(&meta));
+    }
+
+    // ----- list_skills -----
+
+    #[test]
+    fn test_list_skills_finds_workspace_skill() {
+        let (_tmp, loader) = make_workspace_with_skill(None, "# Test Skill\nDoes stuff.");
+        let skills = loader.list_skills(false);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "test-skill");
+        assert_eq!(skills[0].source, "workspace");
+    }
+
+    #[test]
+    fn test_list_skills_empty_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let loader = SkillsLoader::new(tmp.path(), Some(&tmp.path().join("no_builtin")));
+        let skills = loader.list_skills(false);
+        assert!(skills.is_empty());
+    }
+
+    // ----- load_skill -----
+
+    #[test]
+    fn test_load_skill_returns_content() {
+        let (_tmp, loader) = make_workspace_with_skill(None, "# My Skill\nInstructions here.");
+        let content = loader.load_skill("test-skill");
+        assert!(content.is_some());
+        assert!(content.unwrap().contains("Instructions here."));
+    }
+
+    #[test]
+    fn test_load_skill_nonexistent_returns_none() {
+        let (_tmp, loader) = make_workspace_with_skill(None, "body");
+        let content = loader.load_skill("no-such-skill");
+        assert!(content.is_none());
+    }
+
+    // ----- get_skill_metadata -----
+
+    #[test]
+    fn test_get_skill_metadata_with_frontmatter() {
+        let frontmatter = "description: A cool skill\nauthor: tester";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "body");
+        let meta = loader.get_skill_metadata("test-skill");
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.get("description").map(|s| s.as_str()), Some("A cool skill"));
+        assert_eq!(meta.get("author").map(|s| s.as_str()), Some("tester"));
+    }
+
+    #[test]
+    fn test_get_skill_metadata_without_frontmatter() {
+        let (_tmp, loader) = make_workspace_with_skill(None, "plain body");
+        let meta = loader.get_skill_metadata("test-skill");
+        assert!(meta.is_none());
+    }
+
+    #[test]
+    fn test_get_skill_metadata_strips_quotes() {
+        let frontmatter = "description: \"Quoted value\"";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "body");
+        let meta = loader.get_skill_metadata("test-skill").unwrap();
+        assert_eq!(meta.get("description").map(|s| s.as_str()), Some("Quoted value"));
+    }
+
+    // ----- build_skills_summary -----
+
+    #[test]
+    fn test_build_skills_summary_xml_format() {
+        let frontmatter = "description: Test description";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "body");
+        let summary = loader.build_skills_summary();
+        assert!(summary.starts_with("<skills>"));
+        assert!(summary.ends_with("</skills>"));
+        assert!(summary.contains("<name>test-skill</name>"));
+        assert!(summary.contains("<description>Test description</description>"));
+    }
+
+    #[test]
+    fn test_build_skills_summary_empty() {
+        let tmp = TempDir::new().unwrap();
+        let loader = SkillsLoader::new(tmp.path(), Some(&tmp.path().join("no_builtin")));
+        let summary = loader.build_skills_summary();
+        assert_eq!(summary, "");
+    }
+
+    #[test]
+    fn test_build_skills_summary_escapes_xml() {
+        // Create a skill whose name contains XML-special characters.
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("skills").join("a&b");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "---\ndescription: x < y\n---\nbody").unwrap();
+        let loader = SkillsLoader::new(tmp.path(), Some(&tmp.path().join("no_builtin")));
+        let summary = loader.build_skills_summary();
+        assert!(summary.contains("a&amp;b"));
+        assert!(summary.contains("x &lt; y"));
+    }
+
+    // ----- load_skills_for_context -----
+
+    #[test]
+    fn test_load_skills_for_context_strips_frontmatter() {
+        let frontmatter = "description: Test";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "The body content.\n");
+        let names = vec!["test-skill".to_string()];
+        let result = loader.load_skills_for_context(&names);
+        assert!(result.contains("### Skill: test-skill"));
+        assert!(result.contains("The body content."));
+        // Frontmatter should be stripped.
+        assert!(!result.contains("description: Test"));
+    }
+
+    #[test]
+    fn test_load_skills_for_context_nonexistent_skill() {
+        let (_tmp, loader) = make_workspace_with_skill(None, "body");
+        let names = vec!["no-such-skill".to_string()];
+        let result = loader.load_skills_for_context(&names);
+        assert_eq!(result, "");
+    }
+
+    // ----- get_always_skills -----
+
+    #[test]
+    fn test_get_always_skills_with_always_flag() {
+        let frontmatter = "always: true\ndescription: Always on";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "body");
+        let always = loader.get_always_skills();
+        assert!(always.contains(&"test-skill".to_string()));
+    }
+
+    #[test]
+    fn test_get_always_skills_without_flag() {
+        let frontmatter = "description: Normal skill";
+        let (_tmp, loader) = make_workspace_with_skill(Some(frontmatter), "body");
+        let always = loader.get_always_skills();
+        assert!(always.is_empty());
+    }
+
+    // ----- builtin skill priority -----
+
+    #[test]
+    fn test_workspace_skill_shadows_builtin() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create workspace skill.
+        let ws_skill = tmp.path().join("skills").join("overlap");
+        fs::create_dir_all(&ws_skill).unwrap();
+        fs::write(ws_skill.join("SKILL.md"), "workspace version").unwrap();
+
+        // Create builtin skill with same name.
+        let bi_dir = tmp.path().join("builtin");
+        let bi_skill = bi_dir.join("overlap");
+        fs::create_dir_all(&bi_skill).unwrap();
+        fs::write(bi_skill.join("SKILL.md"), "builtin version").unwrap();
+
+        let loader = SkillsLoader::new(tmp.path(), Some(&bi_dir));
+        let skills = loader.list_skills(false);
+
+        // Should only find one, from workspace.
+        let overlap_skills: Vec<&SkillInfo> =
+            skills.iter().filter(|s| s.name == "overlap").collect();
+        assert_eq!(overlap_skills.len(), 1);
+        assert_eq!(overlap_skills[0].source, "workspace");
+
+        // load_skill should return workspace version.
+        let content = loader.load_skill("overlap").unwrap();
+        assert_eq!(content, "workspace version");
+    }
+}

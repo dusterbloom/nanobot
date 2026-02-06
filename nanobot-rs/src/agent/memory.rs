@@ -147,3 +147,191 @@ impl MemoryStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: create a MemoryStore backed by a temporary workspace.
+    fn make_store() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        (tmp, store)
+    }
+
+    // ----- construction -----
+
+    #[test]
+    fn test_new_creates_memory_dir() {
+        let (tmp, store) = make_store();
+        assert!(store.memory_dir.exists(), "memory directory should be created");
+        assert_eq!(store.memory_dir, tmp.path().join("memory"));
+    }
+
+    #[test]
+    fn test_memory_file_path() {
+        let (_tmp, store) = make_store();
+        assert!(
+            store.memory_file.ends_with("MEMORY.md"),
+            "memory_file should point to MEMORY.md"
+        );
+    }
+
+    // ----- write_long_term / read_long_term -----
+
+    #[test]
+    fn test_read_long_term_empty_initially() {
+        let (_tmp, store) = make_store();
+        assert_eq!(store.read_long_term(), "");
+    }
+
+    #[test]
+    fn test_write_and_read_long_term_roundtrip() {
+        let (_tmp, store) = make_store();
+        store.write_long_term("User likes Rust.");
+        assert_eq!(store.read_long_term(), "User likes Rust.");
+    }
+
+    #[test]
+    fn test_write_long_term_overwrites() {
+        let (_tmp, store) = make_store();
+        store.write_long_term("first");
+        store.write_long_term("second");
+        assert_eq!(store.read_long_term(), "second");
+    }
+
+    // ----- append_today / read_today -----
+
+    #[test]
+    fn test_read_today_empty_initially() {
+        let (_tmp, store) = make_store();
+        assert_eq!(store.read_today(), "");
+    }
+
+    #[test]
+    fn test_append_today_creates_file_with_header() {
+        let (_tmp, store) = make_store();
+        store.append_today("Did something important.");
+        let content = store.read_today();
+        let today_str = today_date();
+        assert!(
+            content.contains(&today_str),
+            "today file should contain today's date in its header"
+        );
+        assert!(content.contains("Did something important."));
+    }
+
+    #[test]
+    fn test_append_today_appends() {
+        let (_tmp, store) = make_store();
+        store.append_today("Line 1");
+        store.append_today("Line 2");
+        let content = store.read_today();
+        assert!(content.contains("Line 1"));
+        assert!(content.contains("Line 2"));
+    }
+
+    // ----- get_memory_context -----
+
+    #[test]
+    fn test_get_memory_context_empty() {
+        let (_tmp, store) = make_store();
+        assert_eq!(store.get_memory_context(), "");
+    }
+
+    #[test]
+    fn test_get_memory_context_includes_long_term() {
+        let (_tmp, store) = make_store();
+        store.write_long_term("Likes cats.");
+        let ctx = store.get_memory_context();
+        assert!(ctx.contains("Long-term Memory"));
+        assert!(ctx.contains("Likes cats."));
+    }
+
+    #[test]
+    fn test_get_memory_context_includes_today() {
+        let (_tmp, store) = make_store();
+        store.append_today("Deployed v2.");
+        let ctx = store.get_memory_context();
+        assert!(ctx.contains("Today's Notes"));
+        assert!(ctx.contains("Deployed v2."));
+    }
+
+    #[test]
+    fn test_get_memory_context_combines_both() {
+        let (_tmp, store) = make_store();
+        store.write_long_term("Long-term note");
+        store.append_today("Daily note");
+        let ctx = store.get_memory_context();
+        assert!(ctx.contains("Long-term Memory"));
+        assert!(ctx.contains("Long-term note"));
+        assert!(ctx.contains("Today's Notes"));
+        assert!(ctx.contains("Daily note"));
+    }
+
+    // ----- get_recent_memories -----
+
+    #[test]
+    fn test_get_recent_memories_empty() {
+        let (_tmp, store) = make_store();
+        assert_eq!(store.get_recent_memories(7), "");
+    }
+
+    #[test]
+    fn test_get_recent_memories_includes_today() {
+        let (_tmp, store) = make_store();
+        store.append_today("Today's work");
+        let recent = store.get_recent_memories(1);
+        assert!(
+            recent.contains("Today's work"),
+            "get_recent_memories(1) should include today's file"
+        );
+    }
+
+    // ----- list_memory_files -----
+
+    #[test]
+    fn test_list_memory_files_empty() {
+        let (_tmp, store) = make_store();
+        assert!(store.list_memory_files().is_empty());
+    }
+
+    #[test]
+    fn test_list_memory_files_finds_dated_files() {
+        let (_tmp, store) = make_store();
+        // Create two dated files.
+        fs::write(store.memory_dir.join("2025-01-01.md"), "jan1").unwrap();
+        fs::write(store.memory_dir.join("2025-01-15.md"), "jan15").unwrap();
+        // Also a non-date file that should be excluded.
+        fs::write(store.memory_dir.join("MEMORY.md"), "long-term").unwrap();
+
+        let files = store.list_memory_files();
+        assert_eq!(files.len(), 2, "should find exactly two dated files");
+    }
+
+    #[test]
+    fn test_list_memory_files_sorted_newest_first() {
+        let (_tmp, store) = make_store();
+        fs::write(store.memory_dir.join("2025-01-01.md"), "old").unwrap();
+        fs::write(store.memory_dir.join("2025-06-15.md"), "new").unwrap();
+
+        let files = store.list_memory_files();
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names[0], "2025-06-15.md");
+        assert_eq!(names[1], "2025-01-01.md");
+    }
+
+    // ----- get_today_file -----
+
+    #[test]
+    fn test_get_today_file_path() {
+        let (_tmp, store) = make_store();
+        let today_file = store.get_today_file();
+        let expected_name = format!("{}.md", today_date());
+        assert!(today_file.ends_with(&expected_name));
+    }
+}
